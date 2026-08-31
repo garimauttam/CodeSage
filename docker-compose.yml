@@ -1,0 +1,34 @@
+services:
+  # ── Backend (FastAPI) ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"       # Map host port 8000 to container port 8000
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - CHROMA_PERSIST_DIRECTORY=/app/chroma_data
+    volumes:
+      # Mount a named volume for ChromaDB data persistence
+      # Without this, every `docker compose up` would re-index everything from scratch
+      - chroma_data:/app/chroma_data
+    restart: unless-stopped
+
+  # ── Frontend (React/Vite dev server) ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      # Tell the frontend where the backend API is
+      # In Docker, containers talk to each other by service name (not localhost)
+      - VITE_API_URL=http://backend:8000
+    depends_on:
+      - backend   # Don't start frontend until backend is up
+    restart: unless-stopped
+
+volumes:
+  chroma_data:  # Named volume — persists between container restarts
