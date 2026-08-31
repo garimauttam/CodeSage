@@ -1,0 +1,30 @@
+# Web framework — FastAPI is async-native, perfect for streaming LLM responses
+fastapi==0.111.0
+uvicorn[standard]==0.29.0      # ASGI server that runs FastAPI
+
+# LangChain ecosystem — orchestrates LLM calls, chunking, retrieval chains
+langchain==0.2.5
+langchain-openai==0.1.8        # OpenAI-specific LangChain adapters
+langchain-community==0.2.5     # Community integrations (ChromaDB, GitHub, etc.)
+langchain-chroma==0.1.1        # ChromaDB vector store integration
+
+# Vector database — ChromaDB runs locally (no signup, no cost, no network call)
+# In production you'd swap this for Pinecone with one line change
+chromadb==0.5.0
+
+# OpenAI SDK — for embeddings (text-embedding-3-small) and chat (GPT-4o)
+openai==1.30.5
+
+# Git repo cloning — lets us clone any public GitHub repo into a temp folder
+gitpython==3.1.43
+
+# File parsing utilities
+python-multipart==0.0.9        # Needed for FastAPI file uploads
+aiofiles==23.2.1               # Async file I/O so we don't block the event loop
+
+# Environment variable management
+python-dotenv==1.0.1
+pydantic-settings==2.2.1   # Needed for BaseSettings in config.py
+
+# HTTP client for async requests
+httpx==0.27.0
