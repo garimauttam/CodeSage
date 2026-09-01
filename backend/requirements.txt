@@ -7,6 +7,7 @@ langchain==0.2.5
 langchain-openai==0.1.8        # OpenAI-specific LangChain adapters
 langchain-community==0.2.5     # Community integrations (ChromaDB, GitHub, etc.)
 langchain-chroma==0.1.1        # ChromaDB vector store integration
+langchain-google-genai==1.0.7  # Gemini adapter — free tier, no credit card needed
 
 # Vector database — ChromaDB runs locally (no signup, no cost, no network call)
 # In production you'd swap this for Pinecone with one line change
@@ -20,7 +21,6 @@ gitpython==3.1.43
 
 # File parsing utilities
 python-multipart==0.0.9        # Needed for FastAPI file uploads
-aiofiles==23.2.1               # Async file I/O so we don't block the event loop
 
 # Environment variable management
 python-dotenv==1.0.1
@@ -28,3 +28,23 @@ pydantic-settings==2.2.1   # Needed for BaseSettings in config.py
 
 # HTTP client for async requests
 httpx==0.27.0
+
+# ── Phase 4: Re-ranking ───────────────────────────────────────────────────────
+# sentence-transformers gives us a local cross-encoder for re-ranking retrieved chunks.
+# WHY LOCAL? Cohere Rerank API costs money per call. A local cross-encoder is free,
+# runs on CPU in ~50ms, and is good enough for a portfolio project.
+# The model (ms-marco-MiniLM-L-6-v2) is ~80MB, downloads once, cached forever.
+sentence-transformers==3.0.1
+langchain-huggingface==0.0.3
+rank-bm25==0.2.2
+
+# ── Phase 6: Production polish ────────────────────────────────────────────────
+# Rate limiting — prevents a single IP from burning your OpenAI credits
+slowapi==0.1.9
+limits==3.13.0              # slowapi's underlying counter backend
+
+# Testing — pytest + httpx for integration tests (no real API calls needed)
+pytest==8.2.2
+pytest-asyncio==0.23.7      # async test support
+httpx==0.27.0               # already pinned above, used by TestClient internally
+
