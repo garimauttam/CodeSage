@@ -1,0 +1,225 @@
+"""
+main.py — FastAPI application entry point.
+
+This file's ONLY job is to:
+1. Create the FastAPI app instance
+2. Add middleware (CORS, etc.)
+3. Mount the routers
+4. Run health checks
+
+It should NOT contain any business logic.
+"""
+
+import asyncio
+import logging
+import os
+from contextlib import asynccontextmanager
+
+# Silence ChromaDB telemetry before any chromadb import.
+# ChromaDB's posthog telemetry library has a signature mismatch that spams
+# "capture() takes 1 positional argument but 3 were given" on every DB call,
+# drowning real log output. Setting this env var disables the telemetry client.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from app.limiter import limiter
+
+from app.core.config import get_settings
+from app.api import ingest, chat, review, write, metrics
+
+logger = logging.getLogger(__name__)
+
+settings = get_settings()
+
+# ── LangSmith tracing ─────────────────────────────────────────────────────────
+# LangSmith auto-instruments every LangChain call when these env vars are set.
+# We read them from our Pydantic settings (which may come from .env or Railway vars)
+# and push them into os.environ so the LangChain SDK picks them up automatically.
+#
+# WHY os.environ AND NOT JUST THE SETTINGS OBJECT?
+# LangChain's tracer reads from os.environ directly at import time, not from our
+# settings object. We have to set them before any langchain import runs at request
+# time — doing it here at app startup guarantees that ordering.
+#
+# If the vars aren't set, this block is a no-op. Tracing is purely opt-in.
+if settings.langchain_tracing_v2:
+    os.environ["LANGCHAIN_TRACING_V2"] = settings.langchain_tracing_v2
+if settings.langchain_api_key:
+    os.environ["LANGCHAIN_API_KEY"] = settings.langchain_api_key
+if settings.langchain_project:
+    os.environ["LANGCHAIN_PROJECT"] = settings.langchain_project
+
+logger.info(
+    "LangSmith tracing: %s",
+    "ENABLED (project: %s)" % settings.langchain_project
+    if settings.langchain_tracing_v2 == "true"
+    else "disabled",
+)
+
+# ── Rate limiter ──────────────────────────────────────────────────────────────
+# The shared limiter instance lives in app/limiter.py — imported above.
+# All routes (chat, review) import from that same module, so they all share
+# one counter store per IP. A user cannot bypass limits by switching endpoints.
+
+
+# ── Lifespan — replaces deprecated @app.on_event("startup") ──────────────────
+# FastAPI 0.93+ recommends lifespan context managers over @app.on_event.
+# Everything before `yield` runs at startup; everything after runs at shutdown.
+# The @asynccontextmanager decorator makes a regular async generator into a
+# context manager that FastAPI knows how to call.
+#
+# WHY WARM UP THE RERANKER HERE?
+# The cross-encoder is 80MB. On first use it downloads from HuggingFace and
+# loads into memory (~2-4s). Warming it up at startup means the first real
+# request is instant — the model is already hot.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Startup ──────────────────────────────────────────────────────────────
+    try:
+        from app.services.reranker import _get_cross_encoder
+        from app.services.llm_factory import get_embedding_fn
+        logger.info("Warming up models (reranker + embedding)...")
+        # Run in thread — model loading is CPU-bound, would block the event loop
+        await asyncio.to_thread(_get_cross_encoder)
+        await asyncio.to_thread(get_embedding_fn)
+        logger.info("Models warm and ready.")
+    except Exception as e:
+        # Don't crash startup if model download fails (e.g. no internet in CI)
+        logger.warning(f"Reranker warmup skipped: {e}")
+
+    # Pre-build the BM25 index so the first user query doesn't pay the build cost.
+    # This is a no-op if the collection is empty (fresh install).
+    try:
+        from app.services.retrieval_service import _get_vectorstore, _get_bm25_index
+        vs = await asyncio.to_thread(_get_vectorstore)
+        await asyncio.to_thread(_get_bm25_index, vs)
+        logger.info("BM25 index warmed.")
+    except Exception as e:
+        logger.warning(f"BM25 warmup skipped: {e}")
+
+    yield   # ← server is live and handling requests here
+
+    # ── Shutdown (nothing to clean up, but the pattern is complete) ───────────
+
+
+app = FastAPI(
+    title="CodeSage API",
+    description="RAG-powered codebase Q&A and code review assistant",
+    version="1.0.0",
+    lifespan=lifespan,          # pass the lifespan context manager here
+)
+
+# Attach limiter to app state — route files import `app.state.limiter` via the
+# `@limiter.limit(...)` decorator
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+# ── Request size limit ────────────────────────────────────────────────────────
+# Without this, a malicious client could POST a multi-gigabyte body and exhaust
+# server memory. 10MB covers any reasonable code upload.
+# This runs before route handlers, so it's the first line of defence.
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    max_body_size = 10 * 1024 * 1024  # 10 MB
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > max_body_size:
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "Request body too large. Maximum size is 10MB."},
+        )
+    return await call_next(request)
+
+
+# ── CORS ───────────────────────────────────────────────────────────────────────
+# CORS = Cross-Origin Resource Sharing.
+# Without this, the browser blocks requests from localhost:3000 (React dev server)
+# to localhost:8000 (FastAPI). It's a browser security feature, not a server one.
+# We whitelist only our known frontend origins — never use allow_origins=["*"] in prod.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Routers ────────────────────────────────────────────────────────────────────
+# /api/v1/ prefix on all routes — good practice for API versioning
+# If you ever need breaking changes, you add /api/v2/ without removing v1
+app.include_router(ingest.router, prefix="/api/v1")
+app.include_router(chat.router, prefix="/api/v1")
+app.include_router(review.router, prefix="/api/v1")
+app.include_router(write.router, prefix="/api/v1")
+app.include_router(metrics.router, prefix="/api/v1")
+
+
+@app.get("/health")
+async def health_check():
+    """
+    Deep health check — tests actual dependencies, not just "is the process alive".
+
+    Provider-aware: checks the configured LLM provider (OpenAI or Gemini) + ChromaDB.
+    Railway uses this to decide whether to route traffic to the instance.
+    Returns 503 if any check fails — so a misconfigured deploy is caught immediately.
+    """
+    from app.services.llm_factory import get_provider_name
+    checks: dict[str, str] = {}
+    overall_ok = True
+
+    # ── Check 1: LLM provider ─────────────────────────────────────────────────
+    if settings.llm_provider == "gemini":
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=settings.gemini_api_key)
+            # list_models is a lightweight API call — just validates the key
+            list(genai.list_models())
+            checks["llm"] = f"ok (Gemini — {settings.gemini_chat_model})"
+        except Exception as e:
+            checks["llm"] = f"error: {str(e)[:120]}"
+            overall_ok = False
+    else:
+        try:
+            import openai
+            client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+            await client.models.list()
+            checks["llm"] = f"ok (OpenAI — {settings.openai_chat_model})"
+        except Exception as e:
+            checks["llm"] = f"error: {str(e)[:120]}"
+            overall_ok = False
+
+    # ── Check 2: ChromaDB ─────────────────────────────────────────────────────
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=settings.chroma_persist_directory)
+        client.heartbeat()
+        checks["chromadb"] = "ok"
+    except Exception as e:
+        checks["chromadb"] = f"error: {str(e)[:120]}"
+        overall_ok = False
+
+    status_code = 200 if overall_ok else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ok" if overall_ok else "degraded",
+            "service": "CodeSage API",
+            "provider": get_provider_name(),
+            "checks": checks,
+        },
+    )
+
+
+# ── Dev server entrypoint ──────────────────────────────────────────────────────
+# This block only runs when you execute `python main.py` directly.
+# In production (Docker/Railway), uvicorn is started by the Dockerfile CMD instead.
+if __name__ == "__main__":
+    import uvicorn
+    # Read port from settings — Railway injects PORT env var, local dev uses 8000
+    uvicorn.run("main:app", host="0.0.0.0", port=settings.port, reload=True)
