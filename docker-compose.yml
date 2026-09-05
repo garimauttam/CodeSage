@@ -9,25 +9,36 @@ services:
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - CHROMA_PERSIST_DIRECTORY=/app/chroma_data
+      # Whitelist the frontend origin.
+      # In Docker Compose, the browser sees the frontend on localhost:80,
+      # so we add that to allowed origins.
+      - CORS_ORIGINS=http://localhost:80,http://localhost:3000,http://localhost:5173
     volumes:
-      # Mount a named volume for ChromaDB data persistence
-      # Without this, every `docker compose up` would re-index everything from scratch
+      # Mount a named volume for ChromaDB data persistence.
+      # Without this, every `docker compose up` would re-index everything from scratch.
       - chroma_data:/app/chroma_data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # ── Frontend (React/Vite dev server) ─────────────────────────────────────────
+  # ── Frontend (React, served by nginx) ─────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # VITE_API_URL is baked into the JS bundle at build time by Vite.
+        # In Docker Compose both services share the same host network (from the
+        # browser's perspective), so we use localhost:8000.
+        VITE_API_URL: http://localhost:8000
     ports:
-      - "5173:5173"
-    environment:
-      # Tell the frontend where the backend API is
-      # In Docker, containers talk to each other by service name (not localhost)
-      - VITE_API_URL=http://backend:8000
+      - "80:80"           # nginx serves on port 80
     depends_on:
-      - backend   # Don't start frontend until backend is up
+      backend:
+        condition: service_healthy   # wait until backend health check passes
     restart: unless-stopped
 
 volumes:
