@@ -1,0 +1,51 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments — never commit these, they're huge and machine-specific
+.venv/
+venv/
+env/
+ENV/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Secrets — NEVER commit ────────────────────────────────────────────────────
+.env
+*.env
+!.env.example        # keep the template, not the real secrets
+
+# ── ChromaDB data — re-generated on first run, can be hundreds of MB ──────────
+chroma_data/
+*.chroma
+
+# ── Cloned repos — temporary, deleted after indexing ─────────────────────────
+/tmp/
+backend/tmp/
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── HuggingFace model cache (ms-marco-MiniLM-L-6-v2, ~80MB) ──────────────────
+# Downloaded once, cached forever — no need to commit
+.cache/
